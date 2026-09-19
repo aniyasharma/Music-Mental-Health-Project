@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import re
 import urllib.parse
 from pathlib import Path
 
@@ -838,7 +839,7 @@ HOLIDAY_PATTERN = "|".join([
     r"\bsanta baby\b",
     r"\bjingle bells?\b",
     r"\bnavidad\b",
-    r"\bno\u00ebl\b",
+    r"\bnoël\b",
     r"\bnoel\b",
     r"\bsleigh\b",
     r"\brudolph\b",
@@ -862,18 +863,29 @@ HOLIDAY_PATTERN = "|".join([
     r"\bst\.? nick\b"
 ])
 
+# Use Python's regex engine. Pandas Arrow string columns on Streamlit
+# Cloud raise ArrowInvalid for this pattern via .str.contains().
+HOLIDAY_REGEX = re.compile(
+    HOLIDAY_PATTERN,
+    flags=re.IGNORECASE
+)
+
 
 def is_holiday_music(songs):
 
-    return (
-        songs[TRACK_NAME_COLUMN]
-        .astype(str)
-        .str.lower()
-        .str.contains(
-            HOLIDAY_PATTERN,
-            regex=True,
-            na=False
-        )
+    titles = songs[TRACK_NAME_COLUMN].tolist()
+
+    return pd.Series(
+        [
+            bool(HOLIDAY_REGEX.search(str(title)))
+            if title is not None and not (
+                isinstance(title, float) and pd.isna(title)
+            )
+            else False
+            for title in titles
+        ],
+        index=songs.index,
+        dtype=bool
     )
 
 
