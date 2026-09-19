@@ -1,19 +1,13 @@
-import pandas as pd
-import numpy as np
-import streamlit as st
+import base64
+import json
+import os
+import urllib.parse
 from pathlib import Path
-import base64
-import json
-import urllib.parse
-import requests
-import base64
-import json
-import urllib.parse
-import webbrowser
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from threading import Thread
 
+import numpy as np
+import pandas as pd
 import requests
+import streamlit as st
 
 
 from sklearn.model_selection import train_test_split
@@ -369,9 +363,10 @@ def calculate_emotional_matches(
 
 
 
-CLIENT_ID = "0b585bb6836640b19329bb66d05f2acc"
-CLIENT_SECRET = "e881ea0764664d9484f3fe4ce463f043"
-REDIRECT_URI = "http://127.0.0.1:8888/callback"
+# Fallback credentials for local runs. Prefer Streamlit secrets on Cloud.
+DEFAULT_CLIENT_ID = "0b585bb6836640b19329bb66d05f2acc"
+DEFAULT_CLIENT_SECRET = "e881ea0764664d9484f3fe4ce463f043"
+LOCAL_REDIRECT_URI = "http://127.0.0.1:8501/"
 SCOPES = (
     "user-read-private "
     "user-read-email "
@@ -384,75 +379,106 @@ AUTH_URL = "https://accounts.spotify.com/authorize"
 TOKEN_URL = "https://accounts.spotify.com/api/token"
 PROFILE_URL = "https://api.spotify.com/v1/me"
 
-class CallbackHandler(BaseHTTPRequestHandler):
-    auth_code = None
 
-    def do_GET(self):
-        query = urllib.parse.urlparse(self.path).query
-        params = urllib.parse.parse_qs(query)
+def is_streamlit_cloud():
 
-        if "code" in params:
-            CallbackHandler.auth_code = params["code"][0]
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html")
-            self.end_headers()
-            self.wfile.write(
-                b"<h1>Authorization successful.</h1>"
-                b"<p>You can close this tab and return to the terminal.</p>"
+    return (
+        Path("/mount/src").exists()
+        or os.environ.get("STREAMLIT_RUNTIME_ENV") == "cloud"
+    )
+
+
+def get_secret(name, default=None):
+
+    try:
+        return st.secrets[name]
+    except Exception:
+        return default
+
+
+def get_spotify_client_id():
+
+    return get_secret(
+        "SPOTIFY_CLIENT_ID",
+        DEFAULT_CLIENT_ID
+    )
+
+
+def get_spotify_client_secret():
+
+    return get_secret(
+        "SPOTIFY_CLIENT_SECRET",
+        DEFAULT_CLIENT_SECRET
+    )
+
+
+def get_redirect_uri():
+
+    configured = get_secret("SPOTIFY_REDIRECT_URI")
+
+    if configured:
+
+        return configured.rstrip("/") + "/"
+
+    if is_streamlit_cloud():
+
+        try:
+
+            host = (
+                st.context.headers.get("Host")
+                or st.context.headers.get("host")
             )
-        else:
-            error = params.get("error", ["unknown"])[0]
-            self.send_response(400)
-            self.send_header("Content-Type", "text/html")
-            self.end_headers()
-            self.wfile.write(
-                f"<h1>Authorization failed: {error}</h1>".encode()
-            )
 
-    def log_message(self, format, *args):
-        return
+        except Exception:
+
+            host = None
+
+        if host:
+
+            return f"https://{host}/"
+
+        raise RuntimeError(
+            "Set SPOTIFY_REDIRECT_URI in Streamlit secrets to your "
+            "exact app URL, for example "
+            "https://your-app.streamlit.app/"
+        )
+
+    return LOCAL_REDIRECT_URI
 
 
-def get_authorization_code():
-    CallbackHandler.auth_code = None
+def build_spotify_auth_url():
+
     auth_params = urllib.parse.urlencode(
         {
-            "client_id": CLIENT_ID,
+            "client_id": get_spotify_client_id(),
             "response_type": "code",
-            "redirect_uri": REDIRECT_URI,
+            "redirect_uri": get_redirect_uri(),
             "scope": SCOPES,
+            "show_dialog": "true",
         }
     )
-    auth_link = f"{AUTH_URL}?{auth_params}"
 
-    server = HTTPServer(("127.0.0.1", 8888), CallbackHandler)
-    thread = Thread(target=server.handle_request, daemon=True)
-    thread.start()
-
-    print("Opening browser for Spotify login...")
-    print(f"If it does not open automatically, visit:\n{auth_link}\n")
-    webbrowser.open(auth_link)
-
-    thread.join(timeout=120)
-    server.server_close()
-
-    if not CallbackHandler.auth_code:
-        raise RuntimeError("No authorization code received within 2 minutes.")
-
-    return CallbackHandler.auth_code
+    return f"{AUTH_URL}?{auth_params}"
 
 
 def exchange_code_for_token(code):
-    auth_string = f"{CLIENT_ID}:{CLIENT_SECRET}"
-    auth_base64 = base64.b64encode(auth_string.encode("utf-8")).decode("utf-8")
+
+    client_id = get_spotify_client_id()
+    client_secret = get_spotify_client_secret()
+    auth_string = f"{client_id}:{client_secret}"
+    auth_base64 = base64.b64encode(
+        auth_string.encode("utf-8")
+    ).decode("utf-8")
 
     response = requests.post(
         TOKEN_URL,
-        headers={"Authorization": f"Basic {auth_base64}"},
+        headers={
+            "Authorization": f"Basic {auth_base64}"
+        },
         data={
             "grant_type": "authorization_code",
             "code": code,
-            "redirect_uri": REDIRECT_URI,
+            "redirect_uri": get_redirect_uri(),
         },
     )
 
@@ -465,12 +491,19 @@ def exchange_code_for_token(code):
 
 
 def refresh_access_token(refresh_token):
-    auth_string = f"{CLIENT_ID}:{CLIENT_SECRET}"
-    auth_base64 = base64.b64encode(auth_string.encode("utf-8")).decode("utf-8")
+
+    client_id = get_spotify_client_id()
+    client_secret = get_spotify_client_secret()
+    auth_string = f"{client_id}:{client_secret}"
+    auth_base64 = base64.b64encode(
+        auth_string.encode("utf-8")
+    ).decode("utf-8")
 
     response = requests.post(
         TOKEN_URL,
-        headers={"Authorization": f"Basic {auth_base64}"},
+        headers={
+            "Authorization": f"Basic {auth_base64}"
+        },
         data={
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
@@ -486,15 +519,39 @@ def refresh_access_token(refresh_token):
 
 
 def load_saved_token():
+
+    saved = st.session_state.get("spotify_token_data")
+
+    if saved:
+
+        return saved
+
+    # Shared token files are unsafe for multi-user Cloud apps
+    if is_streamlit_cloud():
+
+        return None
+
     try:
+
         with open(TOKEN_FILE, encoding="utf-8") as file:
+
             return json.load(file)
+
     except (FileNotFoundError, json.JSONDecodeError):
+
         return None
 
 
 def save_token(token_data):
+
+    st.session_state["spotify_token_data"] = token_data
+
+    if is_streamlit_cloud():
+
+        return
+
     with open(TOKEN_FILE, "w", encoding="utf-8") as file:
+
         json.dump(token_data, file, indent=2)
 
 
@@ -512,16 +569,23 @@ def refresh_saved_access_token():
     saved = load_saved_token()
 
     if not saved or not saved.get("refresh_token"):
+
         return None
 
     # Refreshing keeps the scopes of the original login, so an older
     # token has to be replaced rather than reused
     if not has_required_scopes(saved):
+
         return None
 
     try:
-        refreshed = refresh_access_token(saved["refresh_token"])
+
+        refreshed = refresh_access_token(
+            saved["refresh_token"]
+        )
+
     except RuntimeError:
+
         return None
 
     # Spotify only returns a new refresh token some of the time
@@ -533,13 +597,48 @@ def refresh_saved_access_token():
     return saved["access_token"]
 
 
-def log_in_to_spotify():
+def handle_spotify_callback():
 
-    code = get_authorization_code()
-    token_data = exchange_code_for_token(code)
-    save_token(token_data)
+    query_params = st.query_params
 
-    return token_data["access_token"]
+    if "error" in query_params:
+
+        error = query_params.get("error")
+        st.query_params.clear()
+        st.error(
+            f"Spotify login was denied or failed: {error}"
+        )
+        return False
+
+    if "code" not in query_params:
+
+        return False
+
+    code = query_params.get("code")
+
+    if isinstance(code, list):
+
+        code = code[0]
+
+    try:
+
+        token_data = exchange_code_for_token(code)
+        save_token(token_data)
+        connected = connect_spotify(
+            token_data["access_token"]
+        )
+
+    except RuntimeError as error:
+
+        st.query_params.clear()
+        st.error(
+            f"Spotify login failed: {error}"
+        )
+        return False
+
+    st.query_params.clear()
+
+    return connected
 
 
 # ============================================
@@ -1058,13 +1157,16 @@ def restore_spotify_session():
 
 def forget_spotify_session():
 
-    Path(TOKEN_FILE).unlink(
-        missing_ok=True
-    )
+    if not is_streamlit_cloud():
+
+        Path(TOKEN_FILE).unlink(
+            missing_ok=True
+        )
 
     for key in [
         "spotify_access_token",
         "spotify_profile",
+        "spotify_token_data",
         "recommendations",
         "emotional_state",
         "taste"
@@ -1497,7 +1599,14 @@ st.write(
 # SPOTIFY LOGIN
 # ============================================
 
-# Returning users are reconnected from the saved refresh token
+# Spotify redirects back here with ?code=... after the user approves access
+if "spotify_access_token" not in st.session_state:
+
+    if handle_spotify_callback():
+
+        st.rerun()
+
+# Returning users are reconnected from a saved refresh token
 if "spotify_access_token" not in st.session_state:
 
     restore_spotify_session()
@@ -1516,34 +1625,27 @@ if "spotify_access_token" not in st.session_state:
         """
     )
 
-    if st.button(
-        "Log in with Spotify"
-    ):
+    try:
 
-        with st.spinner(
-            "A browser tab is opening. "
-            "Approve access, then come back here."
-        ):
+        redirect_uri = get_redirect_uri()
+        auth_url = build_spotify_auth_url()
 
-            try:
+    except RuntimeError as error:
 
-                access_token = log_in_to_spotify()
+        st.error(str(error))
+        st.stop()
 
-                connected = connect_spotify(
-                    access_token
-                )
+    st.info(
+        "In your Spotify Developer Dashboard, add this "
+        "exact Redirect URI and click Save:\n\n"
+        f"`{redirect_uri}`"
+    )
 
-            except RuntimeError as error:
-
-                connected = False
-
-                st.error(
-                    f"Spotify login failed: {error}"
-                )
-
-        if connected:
-
-            st.rerun()
+    st.link_button(
+        "Log in with Spotify",
+        auth_url,
+        type="primary"
+    )
 
     # Nothing below this point runs until Spotify is connected
     st.stop()
