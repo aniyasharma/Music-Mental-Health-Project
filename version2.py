@@ -1,7 +1,6 @@
 import base64
 import json
 import os
-import re
 import urllib.parse
 from pathlib import Path
 
@@ -824,90 +823,6 @@ def extract_spotify_preferences(
 
 
 # ============================================
-# SEASONAL FILTER
-# ============================================
-
-HOLIDAY_MONTH = 12
-
-# Matched against track titles. Terms like "santa" and "merry" on their
-# own are left out because they also appear in "Santa Monica" and
-# "Merry-Go-Round of Life"
-HOLIDAY_PATTERN = "|".join([
-    r"\bchristmas\b",
-    r"\bx-?mas\b",
-    r"\bsanta claus\b",
-    r"\bsanta baby\b",
-    r"\bjingle bells?\b",
-    r"\bnavidad\b",
-    r"\bnoël\b",
-    r"\bnoel\b",
-    r"\bsleigh\b",
-    r"\brudolph\b",
-    r"\bsilent night\b",
-    r"\bmistletoe\b",
-    r"\bwinter wonderland\b",
-    r"\bauld lang syne\b",
-    r"\bhanukk?ah\b",
-    r"\bdreidel\b",
-    r"\blittle drummer boy\b",
-    r"\bdeck the halls?\b",
-    r"\blet it snow\b",
-    r"\bfrosty the snowman\b",
-    r"\bo holy night\b",
-    r"\bsilver bells\b",
-    r"\bweihnacht",
-    r"\byule\b",
-    r"\bholly jolly\b",
-    r"\bwenceslas\b",
-    r"\breindeer\b",
-    r"\bst\.? nick\b"
-])
-
-# Use Python's regex engine. Pandas Arrow string columns on Streamlit
-# Cloud raise ArrowInvalid for this pattern via .str.contains().
-HOLIDAY_REGEX = re.compile(
-    HOLIDAY_PATTERN,
-    flags=re.IGNORECASE
-)
-
-
-def is_holiday_music(songs):
-
-    titles = songs[TRACK_NAME_COLUMN].tolist()
-
-    return pd.Series(
-        [
-            bool(HOLIDAY_REGEX.search(str(title)))
-            if title is not None and not (
-                isinstance(title, float) and pd.isna(title)
-            )
-            else False
-            for title in titles
-        ],
-        index=songs.index,
-        dtype=bool
-    )
-
-
-def remove_out_of_season_music(
-    songs,
-    today=None
-):
-
-    if today is None:
-
-        today = pd.Timestamp.now()
-
-    if today.month == HOLIDAY_MONTH:
-
-        return songs
-
-    return songs[
-        ~is_holiday_music(songs)
-    ]
-
-
-# ============================================
 # MATCH SPOTIFY GENRES TO THE CATALOG
 # ============================================
 
@@ -1009,23 +924,44 @@ def add_preference_scores(
 
     favorite_genres = set(favorite_genres)
 
-    track_names = (
-        personalized[TRACK_NAME_COLUMN]
-        .astype(str)
-        .str.strip()
-        .str.lower()
-    )
+    track_names = []
+    artist_names = []
 
-    artist_names = (
-        personalized[ARTISTS_COLUMN]
-        .astype(str)
-        .str.strip()
-        .str.lower()
-    )
+    for track_name, artists in zip(
+        personalized[TRACK_NAME_COLUMN].tolist(),
+        personalized[ARTISTS_COLUMN].tolist()
+    ):
 
-    title_match = track_names.isin(
-        favorite_songs
-    )
+        if track_name is None or (
+            isinstance(track_name, float)
+            and pd.isna(track_name)
+        ):
+
+            track_names.append("")
+
+        else:
+
+            track_names.append(
+                str(track_name).strip().lower()
+            )
+
+        if artists is None or (
+            isinstance(artists, float)
+            and pd.isna(artists)
+        ):
+
+            artist_names.append("")
+
+        else:
+
+            artist_names.append(
+                str(artists).strip().lower()
+            )
+
+    title_match = [
+        name in favorite_songs
+        for name in track_names
+    ]
 
     def has_favorite_artist(value):
 
@@ -1038,54 +974,84 @@ def add_preference_scores(
 
         return False
 
-    artist_match = artist_names.apply(
-        has_favorite_artist
-    )
+    artist_match = [
+        has_favorite_artist(value)
+        for value in artist_names
+    ]
 
     # Titles repeat across the catalog, so a track only counts as one
     # the user listens to when the artist lines up as well
-    song_match = title_match & artist_match
+    song_match = [
+        title and artist
+        for title, artist in zip(
+            title_match,
+            artist_match
+        )
+    ]
 
     if GENRE_COLUMN is not None:
 
-        genre_match = (
-            personalized[GENRE_COLUMN]
-            .astype(str)
-            .str.strip()
-            .str.lower()
-            .isin(favorite_genres)
-        )
+        genre_values = []
+
+        for genre in personalized[GENRE_COLUMN].tolist():
+
+            if genre is None or (
+                isinstance(genre, float)
+                and pd.isna(genre)
+            ):
+
+                genre_values.append("")
+
+            else:
+
+                genre_values.append(
+                    str(genre).strip().lower()
+                )
+
+        genre_match = [
+            genre in favorite_genres
+            for genre in genre_values
+        ]
 
     else:
 
-        genre_match = pd.Series(
-            False,
-            index=personalized.index
-        )
+        genre_match = [False] * len(personalized)
 
     SONG_MATCH_SCORE = 1.00
     ARTIST_MATCH_SCORE = 0.70
     GENRE_MATCH_SCORE = 0.35
 
-    personalized["preference_score"] = np.where(
+    preference_scores = []
 
+    for song_hit, artist_hit, genre_hit in zip(
         song_match,
+        artist_match,
+        genre_match
+    ):
 
-        SONG_MATCH_SCORE,
+        if song_hit:
 
-        np.where(
-
-            artist_match,
-
-            ARTIST_MATCH_SCORE,
-
-            np.where(
-                genre_match,
-                GENRE_MATCH_SCORE,
-                0.0
+            preference_scores.append(
+                SONG_MATCH_SCORE
             )
-        )
-    )
+
+        elif artist_hit:
+
+            preference_scores.append(
+                ARTIST_MATCH_SCORE
+            )
+
+        elif genre_hit:
+
+            preference_scores.append(
+                GENRE_MATCH_SCORE
+            )
+
+        else:
+
+            preference_scores.append(0.0)
+
+    personalized["preference_score"] = preference_scores
 
     return personalized
 
@@ -1464,12 +1430,7 @@ def recommend_songs(
         )
     )
 
-    # 3. Hold back holiday music outside December
-    songs = remove_out_of_season_music(
-        songs
-    )
-
-    # 4. Convert Spotify listening
+    # 3. Convert Spotify listening
     # history into preferences
     (
         favorite_artists,
@@ -1491,7 +1452,7 @@ def recommend_songs(
         spotify_genres
     )
 
-    # 5. Add Spotify preference score
+    # 4. Add Spotify preference score
     songs = add_preference_scores(
 
         songs,
@@ -1503,7 +1464,7 @@ def recommend_songs(
         favorite_genres
     )
 
-    # 6. Keep only music that matches the
+    # 5. Keep only music that matches the
     # user's taste, as long as that leaves
     # enough candidates to choose from
     familiar = songs[
@@ -1514,7 +1475,7 @@ def recommend_songs(
 
         songs = familiar.copy()
 
-    # 7. Add previous feedback
+    # 6. Add previous feedback
     songs = add_feedback_scores(
 
         songs,
@@ -1524,7 +1485,7 @@ def recommend_songs(
         stress_level
     )
 
-    # 8. Calculate final score
+    # 7. Calculate final score
     songs = calculate_final_score(
         songs
     )
@@ -1655,8 +1616,7 @@ if "spotify_access_token" not in st.session_state:
 
     st.link_button(
         "Log in with Spotify",
-        auth_url,
-        type="primary"
+        auth_url
     )
 
     # Nothing below this point runs until Spotify is connected
@@ -1879,12 +1839,6 @@ if "recommendations" in st.session_state:
             "No overlap was found between your Spotify genres "
             "and this catalog, so these are ranked on emotional "
             "fit alone."
-        )
-
-    if pd.Timestamp.now().month != HOLIDAY_MONTH:
-
-        st.caption(
-            "Holiday music is held back until December."
         )
 
     for rank, (_, song) in enumerate(
